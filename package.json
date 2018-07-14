@@ -1,0 +1,24 @@
+{
+  "name": "nobleant",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "testrpc": "ganache-cli",
+    "test": "truffle test"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "babel-polyfill": "^6.26.0",
+    "babel-preset-env": "^1.7.0",
+    "babel-register": "^6.26.0",
+    "bignumber.js": "^7.2.1",
+    "chai": "^4.1.2",
+    "chai-as-promised": "^7.1.1",
+    "chai-bignumber": "^2.0.2",
+    "ganache-cli": "^6.1.4",
+    "truffle": "^4.1.13",
+    "zeppelin-solidity": "^1.10.0"
+  }
+}
