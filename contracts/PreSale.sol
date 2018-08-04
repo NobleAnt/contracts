@@ -7,28 +7,36 @@ import 'zeppelin-solidity/contracts/token/ERC20/ERC20.sol';
 contract PreSale is Ownable {
     using SafeMath for uint256;
 
-    uint256 public weiRaised;
-
     mapping(address => uint256) public unconfirmedMap;
     mapping(address => uint256) public confirmedMap;
+
+    mapping(address => address) public holderReferrer;
+    mapping(address => uint256) public holdersOrder;
     address[] public holders;
-    mapping(address => uint) holdersOrder;
+    uint256 public holdersCount;
 
-    mapping(address => uint256) public holdersGotTokens;
+    mapping(address => uint256) public bonusMap;
+    mapping(address => uint256) public topMap;
+    uint256 public confirmedAmount;
+    uint256 public bonusAmount;
 
-    mapping(address => address[]) _holderReferrals;
-    mapping(address => address) _holderReferrer;
+    uint256 lastOf10 = 0;
+    uint256 lastOf15 = 0;
 
-    mapping(address => uint256) bonusMap;
-    uint256 confirmedAmount;
-    uint256 bonusAmount;
+    mapping(address => bool) _isConfirmed;
 
     uint256 public totalSupply;
 
-    uint REF_BONUS_PERCENT = 50;
+    uint256 REF_BONUS_PERCENT = 50;
+    uint256 MIN_AMOUNT = 9 * 10e15;
+    uint256 OPERATIONS_FEE = 10e15;
 
-    uint256 startTime;
-    uint256 endTime;
+    uint256 public startTime;
+    uint256 public endTime;
+    //48 hours
+    uint256 public confirmTime = 48 * 3600;
+
+    bool internal _isGoalReached = false;
 
     ERC20 token;
 
@@ -38,18 +46,13 @@ contract PreSale is Ownable {
         uint256 _endTime,
         ERC20 _token
     ) public {
+        require(_startTime >= now);
+        require(_startTime < _endTime);
+
         totalSupply = _totalSupply;
         startTime = _startTime;
         endTime = _endTime;
         token = _token;
-    }
-
-    function getRaised() public finished onlyOwner {
-        uint256 raised = address(this).balance;
-        for (uint i = 0; i < holders.length; i++) {
-            raised = raised.sub(unconfirmedMap[holders[i]]);
-        }
-        owner.transfer(raised);
     }
 
     modifier pending() {
@@ -57,122 +60,197 @@ contract PreSale is Ownable {
         _;
     }
 
-    modifier finished() {
-        require(now >= endTime);
+    modifier isAbleConfirmation() {
+        require(now >= startTime && now < endTime + confirmTime);
+        _;
+    }
+
+    modifier hasClosed() {
+        require(now >= endTime + confirmTime);
+        _;
+    }
+
+    modifier isGoalReached() {
+        require(_isGoalReached);
         _;
     }
 
     modifier onlyConfirmed() {
-        require(isConfirmed(msg.sender));
+        require(_isConfirmed[msg.sender]);
         _;
     }
 
-    modifier onlyHolder() {
-        require(confirmedMap[msg.sender] > 0 || unconfirmedMap[msg.sender] > 0);
-        _;
+    function() payable public pending {
+        _buyTokens(msg.sender, msg.value);
     }
 
-    function() payable public {
-        buyTokens(msg.sender);
+    function buyTokens(address holder) payable public pending {
+        _buyTokens(holder, msg.value);
     }
 
-    //TODO top of 10 or 15
-    function addBonusOfTop(address holder, uint256 amount) internal {
+    function buyTokensByReferrer(address holder, address referrer) payable public pending {
+        if (_canSetReferrer(holder, referrer)) {
+            _setReferrer(holder, referrer);
+        }
+        uint256 amount = msg.value - OPERATIONS_FEE;
+        holder.transfer(OPERATIONS_FEE);
+        _buyTokens(holder, amount);
+    }
+
+    function _buyTokens(address holder, uint256 amount) private {
+        require(amount >= MIN_AMOUNT);
+
+        if (_isConfirmed[holder]) {
+            confirmedMap[holder] = confirmedMap[holder].add(amount);
+            confirmedAmount = confirmedAmount.add(amount);
+        } else {
+            unconfirmedMap[holder] = unconfirmedMap[holder].add(amount);
+        }
+
+        if (holdersOrder[holder] == 0) {
+            holders.push(holder);
+            holdersOrder[holder] = holders.length;
+            holdersCount++;
+        }
+
+        _addBonus(holder, amount);
+    }
+
+    function _addBonus(address holder, uint256 amount) internal {
+        _addBonusOfTop(holder, amount);
+        _topBonus();
+        _addBonusOfReferrer(holder, amount);
+    }
+
+    function _addBonusOfTop(address holder, uint256 amount) internal {
         uint256 bonusOf = 0;
 
-        if (holdersOrder[holder] < 10 || holdersOrder[holder] <= holders.length.div(10)) {
+        if (holdersOrder[holder] <= holdersCount.div(10)) {
             bonusOf = amount.div(10);
-        } else if (holdersOrder[holder] <= holders.length.mul(15).div(100)) {
+        } else if (holdersOrder[holder] <= holdersCount.mul(15).div(100)) {
             bonusOf = amount.mul(5).div(100);
         }
 
-        if(bonusOf == 0) {
+        if (bonusOf == 0) {
             return;
         }
 
-        bonusMap[holder] = bonusMap[holder].add(bonusOf);
+        topMap[holder] = topMap[holder].add(bonusOf);
 
-        if (isConfirmed(holder)) {
+        if (_isConfirmed[holder]) {
             bonusAmount = bonusAmount.add(bonusOf);
         }
     }
 
-    function addBonusOfReferrer(address holder, uint256 amount) internal {
-        if (_holderReferrer[holder] == 0x0) {
+    function _topBonus() internal {
+        uint256 bonusFor = 0;
+        address holder;
+        uint256 currentAmount;
+
+        if (lastOf10 < holdersCount.div(10)) {
+            holder = holders[lastOf10++];
+            currentAmount = _isConfirmed[holder] ? confirmedMap[holder] : unconfirmedMap[holder];
+            bonusFor = currentAmount.div(10);
+        } else if (lastOf15 < holdersCount.mul(15).div(100)) {
+            holder = holders[lastOf15++];
+            currentAmount = _isConfirmed[holder] ? confirmedMap[holder] : unconfirmedMap[holder];
+            bonusFor = currentAmount.div(20);
+        } else {
             return;
         }
 
-        address referrer = _holderReferrer[holder];
-
-        bonusMap[holder] = bonusMap[holder].add(amount.div(2));
-        bonusMap[referrer] = bonusMap[referrer].add(amount.div(2));
-
-        if (isConfirmed(holder)) {
-            bonusAmount = bonusAmount.add(amount.div(2));
+        if (bonusFor <= topMap[holder]) {
+            return;
         }
 
-        if (isConfirmed(referrer)) {
-            bonusAmount = bonusAmount.add(amount.div(2));
+        if (_isConfirmed[holder]) {
+            uint256 diff = bonusFor - topMap[holder];
+            bonusAmount = bonusAmount.add(diff);
+        }
+
+        topMap[holder] = bonusFor;
+    }
+
+    function _addBonusOfReferrer(address holder, uint256 amount) internal {
+        if (holderReferrer[holder] == 0x0) {
+            return;
+        }
+
+        address referrer = holderReferrer[holder];
+        uint256 bonus = amount.div(2);
+
+        bonusMap[holder] = bonusMap[holder].add(bonus);
+        bonusMap[referrer] = bonusMap[referrer].add(bonus);
+
+        if (_isConfirmed[holder]) {
+            bonusAmount = bonusAmount.add(bonus);
+        }
+
+        if (_isConfirmed[referrer]) {
+            bonusAmount = bonusAmount.add(bonus);
         }
     }
 
-    function addBonus(address holder, uint256 amount) internal {
-//        addBonusOfTop(holder, amount);
-        addBonusOfReferrer(holder, amount);
+    function _canSetReferrer(address holder, address referrer) view private returns (bool) {
+        return holderReferrer[holder] == 0x0
+        && holder != referrer
+        && referrer != 0x0
+        && holderReferrer[referrer] != holder;
     }
 
-    function buyTokens(address holder) payable public pending {
-        if (isConfirmed(holder)) {
-            confirmedMap[holder] = confirmedMap[holder].add(msg.value);
+    function _setReferrer(address holder, address referrer) private {
+        holderReferrer[holder] = referrer;
+
+        if (_isConfirmed[holder]) {
+            _addBonusOfReferrer(holder, confirmedMap[holder]);
         } else {
-            unconfirmedMap[holder] = unconfirmedMap[holder].add(msg.value);
-        }
-
-        holders.push(holder);
-        holdersOrder[holder] = holders.length;
-
-        addBonus(holder, msg.value);
-    }
-
-    function setReferrer(address referrer) public onlyHolder {
-        address holder = msg.sender;
-        require(_holderReferrer[holder] == 0x0);
-        require(_holderReferrer[referrer] != holder);
-
-        _holderReferrer[msg.sender] = referrer;
-
-        if (isConfirmed(holder)) {
-            addBonus(holder, confirmedMap[holder]);
-        } else {
-            addBonus(holder, unconfirmedMap[holder]);
+            _addBonusOfReferrer(holder, unconfirmedMap[holder]);
         }
     }
 
-    function confirm(address holder) public pending onlyOwner {
+    function setReferrer(address referrer) public pending {
+        require(_canSetReferrer(msg.sender, referrer));
+        _setReferrer(msg.sender, referrer);
+    }
+
+    function _confirm(address holder) private {
         confirmedMap[holder] = unconfirmedMap[holder];
         unconfirmedMap[holder] = 0;
 
         confirmedAmount = confirmedAmount.add(confirmedMap[holder]);
-        bonusAmount = bonusAmount.add(bonusMap[holder]);
+        bonusAmount = bonusAmount.add(bonusMap[holder]).add(topMap[holder]);
+        _isConfirmed[holder] = true;
     }
 
     function isConfirmed(address holder) public view returns (bool) {
-        return confirmedMap[holder] > 0;
+        return _isConfirmed[holder];
     }
 
-    function getTokens() public finished onlyConfirmed returns (uint256) {
-        require(confirmedMap[msg.sender] > 0);
+    function getTokens() public hasClosed isGoalReached onlyConfirmed returns (uint256) {
         uint256 tokens = calculateTokens(msg.sender);
+        require(tokens > 0);
         confirmedMap[msg.sender] = 0;
+        bonusMap[msg.sender] = 0;
+        topMap[msg.sender] = 0;
         require(token.transfer(msg.sender, tokens));
     }
 
-    function getRefund() public finished {
-        uint256 funds = unconfirmedMap[msg.sender];
-        require(funds > 0);
+    function getRefund() public hasClosed {
+        address holder = msg.sender;
+        uint256 funds = 0;
 
-        unconfirmedMap[msg.sender] = 0;
-        msg.sender.transfer(funds);
+        if (_isConfirmed[holder]) {
+            require(_isGoalReached == false);
+            funds = confirmedMap[holder];
+            require(funds > 0);
+            confirmedMap[holder] = 0;
+        } else {
+            funds = unconfirmedMap[holder];
+            require(funds > 0);
+            unconfirmedMap[holder] = 0;
+        }
+
+        holder.transfer(funds);
     }
 
     function calculateTokens(address holder) public view returns (uint256) {
@@ -183,7 +261,37 @@ contract PreSale is Ownable {
         return confirmedAmount.add(bonusAmount);
     }
 
+    function getCurrentPrice() public view returns (uint256) {
+        return calculatePie().div(totalSupply);
+    }
+
     function calculateHolderPiece(address holder) public view returns (uint256){
-        return confirmedMap[holder].add(bonusMap[holder]);
+        return confirmedMap[holder].add(bonusMap[holder]).add(topMap[holder]);
+    }
+
+    //***** admin ***
+    function confirm(address holder) public isAbleConfirmation onlyOwner {
+        require(!_isConfirmed[holder]);
+
+        _confirm(holder);
+    }
+
+    function confirmBatch(address[] _holders) public isAbleConfirmation onlyOwner {
+        for (uint i = 0; i < _holders.length; i++) {
+            if (!_isConfirmed[_holders[i]]) {
+                _confirm(_holders[i]);
+            }
+        }
+    }
+
+    function setReached(bool _isIt) public onlyOwner isAbleConfirmation {
+        _isGoalReached = _isIt;
+        if (!_isIt) {
+            token.transfer(owner, totalSupply);
+        }
+    }
+
+    function getRaised() public hasClosed isGoalReached onlyOwner {
+        owner.transfer(confirmedAmount);
     }
 }

@@ -37,49 +37,77 @@ contract('PreSale', accounts => {
       this.token.address
     )
 
+    console.log(TokenCap.toString(),
+      StartTime,
+      EndTime,
+      this.token.address)
+
     await this.token.transfer(this.contract.address, TokenCap.toString())
   })
 
   it('send funds', async function () {
     const amount = ether(1)
     await increaseTimeTo(StartTime + 100)
+    await this.contract.confirm(investor3)
     await this.contract.buyTokens(investor1, {value: amount})
-    await this.contract.buyTokens(investor2, {value: amount})
+    await this.contract.buyTokensByReferrer(investor2, investor1, {value: amount})
     await this.contract.buyTokens(investor3, {value: amount})
-    await this.contract.buyTokens(investor4, {value: amount})
+  })
+
+  it('send 10', async function () {
+    const amount = ether(1)
+    for(let i = 4; i< 10; i++) {
+      await this.contract.buyTokens(accounts[i], {value: amount})
+    }
+    (await this.contract.topMap(investor1)).should.bignumber.equal(amount.div(20));
+
+    await this.contract.buyTokens(owner, {value: amount});
+    (await this.contract.topMap(investor1)).should.bignumber.equal(amount.div(10))
   })
 
   it('confirm', async function () {
-    await this.contract.confirm(investor1)
-    await this.contract.confirm(investor2)
-    await this.contract.confirm(investor3)
-    // await this.contract.confirm(investor4)
+    await this.contract.confirmBatch([investor1, investor2])
+    // await this.contract.confirm(investor2)
   })
 
-  it('getRefBonus success', async function () {
-    await this.contract.setReferrer(investor1, {from: investor2})
+  it('setReferrer', async function () {
+    await this.contract.setReferrer(investor2, {from: investor3})
   })
 
-  it('getRefBonus non loopback', async function () {
+  it('setReferrer non loopback', async function () {
     await this.contract.setReferrer(investor2, {from: investor1}).should.be.rejected
+    await this.contract.setReferrer(investor1, {from: investor1}).should.be.rejected
+  })
+
+  it('happy end', async function () {
+    await increaseTimeTo(EndTime)
+    await this.contract.setReached(true)
   })
 
   it('getTokens', async function () {
-    await increaseTimeTo(EndTime + 100)
+    await increaseTimeTo(EndTime + 3600 * 48)
+
+    let t1 = await this.contract.calculateTokens.call(investor1)
+    let t2 = await this.contract.calculateTokens.call(investor2)
+    let t3 = await this.contract.calculateTokens.call(investor3)
+
+    console.log('tokens', t1.add(t2).add(t3).toString(), TokenCap.toString())
+
+    let b1 = await this.contract.calculateHolderPiece.call(investor1)
+    let b2 = await this.contract.calculateHolderPiece.call(investor2)
+    let b3 = await this.contract.calculateHolderPiece.call(investor3)
+
+    console.log('eth', b1.toString(), b2.toString(), b3.toString())
+
     await this.contract.getTokens({from: investor1})
     await this.contract.getTokens({from: investor2})
     await this.contract.getTokens({from: investor3})
-    // await this.contract.getTokens({from: investor4})
 
     let bal1 = await this.token.balanceOf.call(investor1)
     let bal2 = await this.token.balanceOf.call(investor2)
     let bal3 = await this.token.balanceOf.call(investor3)
-    // let bal4 = await this.token.balanceOf.call(investor4)
 
-    console.log(bal1.toString(), bal2.toString(), bal3.toString());
-
-    bal1.should.bignumber.equal(bal2)
-    TokenCap.should.bignumber.equal(bal1.add(bal2).add(bal3))
+    TokenCap.minus(bal1.add(bal2).add(bal3)).should.bignumber.equal(1)
   })
 
   it('getTokens not duplicate', async function () {
@@ -87,14 +115,8 @@ contract('PreSale', accounts => {
   })
 
   it('get funds', async function () {
-    let balance = await web3.eth.getBalance(owner)
-    await web3.eth.getBalance(this.contract.address).should.bignumber.equal(ether(4))
-    let {receipt} = await this.contract.getRaised()
-    let newBalance = await web3.eth.getBalance(owner)
-    let fee = new web3.BigNumber(receipt.gasUsed).mul(10 ** 11)
-    newBalance.minus(balance).plus(fee).should.bignumber.equal(ether(3))
-
-    await web3.eth.getBalance(this.contract.address).should.bignumber.equal(ether(1))
+    await this.contract.getRaised()
+    await web3.eth.getBalance(this.contract.address).should.bignumber.equal(ether(7))
   })
 
   it('refund', async function () {
@@ -103,6 +125,11 @@ contract('PreSale', accounts => {
     let newBalance = await web3.eth.getBalance(investor4)
     let fee = new web3.BigNumber(receipt.gasUsed).mul(10 ** 11)
     newBalance.minus(balance).plus(fee).should.bignumber.equal(ether(1))
+
+    for(let i = 5; i< 10; i++) {
+      await this.contract.getRefund({from: accounts[i]})
+    }
+    await this.contract.getRefund({from: owner})
 
     await web3.eth.getBalance(this.contract.address).should.bignumber.equal(0)
   })
